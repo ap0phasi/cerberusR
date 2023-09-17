@@ -20,6 +20,8 @@ library(tensorflow)
 
 library(cerberusR)
 
+set.seed(128)
+
 ```
 
 
@@ -41,7 +43,8 @@ time_series_data[[1]]=as.POSIXct(time_series_data[[1]],format="%d.%m.%Y %H:%M:%S
 names(time_series_data)[1]="timestamp"
 
 library(knitr)
-kable(head(time_series_data))
+library(kableExtra)
+kable(head(time_series_data), "html") %>% kable_styling("striped") %>% scroll_box(width = "100%")
 ```
 
 This is the format of timeseries data best for CerberusR, with the first column being the timestamp. 
@@ -117,7 +120,8 @@ actual = prepared_data$resampled_time_series$res_resamp[start_index:end_index,re
 matplot(responses,type="l",lwd=2)
 matpoints(actual,type="l")
 ```
- This shows how our model compares to the resampled data, but we can also use cerberusR's descaling functionality to compare
+
+This shows how our model compares to the resampled data, but we can also use cerberusR's descaling functionality to compare
 to the raw data. 
 ```{r}
 generated_prediction <- descale_response(responses,
