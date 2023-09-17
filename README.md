@@ -40,4 +40,4 @@ Please refer to the vignettes for usage and examples:
 
 1. [Climate Data Forecasting]
 
-[Climate Data Forecasting]: http://htmlpreview.github.io/?https://github.com/ap0phasi/cerberusTS/blob/main/vignettes/climate_data_example.html
+[Climate Data Forecasting]: http://htmlpreview.github.io/?https://github.com/ap0phasi/cerberusR/blob/main/vignettes/climate_data_example.html
