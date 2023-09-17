@@ -1,0 +1,126 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(abind)
+library(keras)
+library(tensorflow)
+
+```
+
+
+First we pull in some sample timeseries, in this case we will use the climate timeseries from https://www.kaggle.com/datasets/mnassrib/jena-climate
+
+```{r}
+time_series_data <- read.csv("../data/jena_climate_2009_2016.csv")
+```
+
+I will just pull the first bit of data for demo
+```{r}
+time_series_data <- time_series_data[1:60000,]
+```
+
+Clean up the data:
+```{r}
+names(time_series_data)=gsub("[.]","",names(time_series_data))
+time_series_data[[1]]=as.POSIXct(time_series_data[[1]],format="%d.%m.%Y %H:%M:%S")
+names(time_series_data)[1]="timestamp"
+```
+
+Cerberus works off call, context, and response. Users can specify the resolution and window size for call, response, and contexts. We also provide the units. The size of context_ts also gives us how many context heads to use. 
+```{r}
+source("../R/preprocess_functions.R")
+
+config <- cerberus_config(
+            call_feature_indx = 2:15,
+            res_feature_indx = c(2,3,6),
+            context_feature_indx = 2:15,
+            ts_units = "hours",
+            call_ts = 2,
+            call_size = 48,
+            res_ts = 2,
+            res_size = 12,
+            context_ts = c(6),
+            context_size = c(12),
+            scale_range = c(0,1)
+)
+
+prepared_data <- prepare_inputs(time_series_data,
+                                config = config)
+
+training_all <- grab_train_samples(prepared_data$formatted_all,0.7)
+```
+
+
+Load in functions
+```{r}
+source("../R/build_cerberus.R")
+```
+
+And finally we can build and train our neural network
+```{r}
+model <- build_cerberus(training_all, 64)
+if (file.exists("../data/cerberus_weights_climate.RdA")){
+  keras::set_weights(model,readRDS("../data/cerberus_weights_climate.RdA"))
+}else{
+  model <- train_cerberus(model, training_all, epochs = 50)
+}
+
+```
+```{r}
+training_res = (model %>% predict(c(list(training_all$inputs$train_call),
+                                    training_all$inputs$train_cont,
+                                    list(training_all$inputs$train_res))))
+image(training_res)
+image(training_all$outputs)
+print(paste0("Training RMSE: ",sqrt(mean((training_res-training_all$outputs)^2))))
+```
+```{r}
+all_res = (model %>% predict(c(list(prepared_data$formatted_all$inputs$x_call),
+                               prepared_data$formatted_all$inputs$x_cont,
+                               list(prepared_data$formatted_all$inputs$x_res))))
+image(all_res)
+image(prepared_data$formatted_all$outputs)
+print(paste0("All RMSE: ",sqrt(mean((all_res-prepared_data$formatted_all$outputs)^2))))
+```
+
+Now we have to evaluate it generatively, meaning we first give it a timestamp with no response, make it come up with a single prediction, pass that in as the response, and continue. 
+```{r}
+
+source("../R/postprocess_functions.R")
+
+timestamp <- tail(prepared_data$resampled_time_series$res_resamp$timestamp,sample(12:50,1))[1]
+
+responses = generate_prediction(model,timestamp,
+                                prepared_data$resampled_time_series,
+                                names(prepared_data$scaled_data),
+                                config)
+
+start_index = which(prepared_data$resampled_time_series$res_resamp$timestamp==timestamp)
+end_index = start_index+config$res_size-1
+res_features <- names(prepared_data$scaled_data)[config$res_feature_indx]
+actual = prepared_data$resampled_time_series$res_resamp[start_index:end_index,res_features]
+
+matplot(responses,type="l",lwd=2)
+matpoints(actual,type="l")
+```
+```{r}
+generated_prediction <- descale_response(responses,
+                                         prepared_data$min_max_df,
+                                         config,
+                                         names(prepared_data$scaled_data),
+                                         timestamp)
+for (ipp in 1:length(res_features)){
+  matplot(generated_prediction[,1],generated_prediction[,res_features[ipp]],type="l",col="red")
+  matlines(time_series_data[,1],time_series_data[,res_features[ipp]],col = "blue")
+  title(res_features[ipp])
+}
+
+```
+

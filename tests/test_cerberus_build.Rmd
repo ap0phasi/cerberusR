@@ -1,0 +1,271 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(abind)
+library(keras)
+library(tensorflow)
+
+```
+
+
+First we pull in some sample timeseries, in this case we will use the climate timeseries from https://www.kaggle.com/datasets/mnassrib/jena-climate
+
+```{r}
+time_series_data <- read.csv("../data/jena_climate_2009_2016.csv")
+```
+
+I will just pull the first bit of data for demo
+```{r}
+time_series_data <- time_series_data[1:6000,]
+```
+
+Clean up the data:
+```{r}
+names(time_series_data)=gsub("[.]","",names(time_series_data))
+time_series_data[[1]]=as.POSIXct(time_series_data[[1]],format="%d.%m.%Y %H:%M:%S")
+names(time_series_data)[1]="timestamp"
+```
+
+Cerberus works off call, context, and response. Users can specify the resolution and window size for call, response, and contexts. We also provide the units. The size of context_ts also gives us how many context heads to use. 
+```{r}
+res_units = "hours"
+# Time steps
+call_ts = 2
+res_ts = 2
+context_ts = c(6,12)
+
+# Sizes
+call_size = 48
+res_size = 12
+context_size = c(12,4)
+context_len = length(context_size)
+
+#Expect event size to be the same as res_size but this can be changed
+event_size = 12
+```
+
+Now we need to calculate window sizes
+```{r}
+#timestep of timeseries
+timestep = diff(time_series_data[[1]][1:2])
+units(timestep)=res_units
+timestep = as.numeric(timestep)
+call_resamp = call_ts/timestep
+res_resamp = res_ts/timestep
+context_resamp = context_ts/timestep
+```
+
+Scale all features between 0 and 1. 
+```{r}
+# Function to calculate and save min-max values for each feature
+calculate_min_max <- function(data) {
+  min_max_df <- data.frame(
+    feature = names(data)[-1],
+    min_value = apply(data[, -1], 2, min),
+    max_value = apply(data[, -1], 2, max)
+  )
+  return(min_max_df)
+}
+
+# Function to scale features between user-defined range using pre-calculated min-max values
+scale_features <- function(data, min_max_df, min_range = -1, max_range = 1) {
+  scaled_data <- data
+  for (feature in min_max_df$feature) {
+    min_value <- min_max_df$min_value[min_max_df$feature == feature]
+    max_value <- min_max_df$max_value[min_max_df$feature == feature]
+    scaled_data[, feature] <- min_range + ((data[, feature] - min_value) * (max_range - min_range)) / (max_value - min_value)
+  }
+  return(scaled_data)
+}
+
+min_max_df <- calculate_min_max(time_series_data)
+scaled_data <- scale_features(time_series_data,min_max_df,0,1)
+
+features = names(scaled_data)[-c(1)]
+call_features <- features
+res_features <- features[c(1,2,5)]
+context_features <- features
+```
+
+Now go through all our resampling and save in a list. 
+```{r}
+downsample_timeseries <- function(data, window_size) {
+  
+  data %>%
+    mutate(timestamp = as.POSIXct(timestamp)) %>%
+    arrange(timestamp) %>%
+    group_by(group = ceiling(row_number() / window_size)) %>%
+    summarise(timestamp = last(timestamp), across(-group,  ~mean(.)))
+}
+
+resampled_time_series <- list()
+
+resampled_time_series[[paste("call_resamp")]]<-downsample_timeseries(scaled_data,call_resamp)
+resampled_time_series[[paste("res_resamp")]]<-downsample_timeseries(scaled_data,res_resamp)
+
+for (icontext in 1:length(context_resamp)){
+  resampled_time_series[[sprintf("context_%s_resamp",icontext)]]<-downsample_timeseries(scaled_data,context_resamp[icontext])
+}
+```
+
+Now that we have resampled our data, we have to get it all into a list. The structure of this list follows a masked transformer. However, we have to first establish our response windows. 
+```{r}
+
+assign_call <- function(data,timestamp,desired_size,features){
+  in_head <- matrix(0,nrow = desired_size,ncol = length(features))
+  end_points <- which(data$timestamp<timestamp)
+  if (length(end_points)>0){
+    assign_index = (max(end_points)-desired_size+1):max(end_points)
+    #Sometimes this will cause assign_index to drop below 1. We want to not include those values
+    in_head[(1:desired_size)[assign_index>0],]=as.matrix(data[assign_index[assign_index>0],features])
+    return(in_head)
+  }else{
+    return(in_head)
+  }
+}
+#Response events:
+skip_size = 1
+start_index = seq(1,(dim(resampled_time_series$res_resamp)[1]-event_size),skip_size)
+end_index = seq(event_size,(dim(resampled_time_series$res_resamp)[1]),skip_size)
+end_index = end_index[1:length(start_index)]
+
+training_dat <- list()
+for (ires in 1:length(start_index)){
+  train_in <- list()
+  #Find timestamp that corresponds with the start_index
+  timestamp <- resampled_time_series$res_resamp$timestamp[ires]
+  res_head_base <- as.matrix(resampled_time_series$res_resamp[start_index[ires]:end_index[ires],res_features])
+  
+  call_head <- assign_call(resampled_time_series$call_resamp,timestamp,call_size,call_features)
+  context_heads = list()
+  for (icontext in 1:length(context_size)){
+    context_heads[[paste0("context_",icontext)]]<-  assign_call(resampled_time_series[[sprintf("context_%s_resamp",icontext)]],
+                                                                timestamp,
+                                                                context_size[icontext],
+                                                                context_features)
+  }
+  
+  for (iresponse in 1:res_size){
+    #Apply masking
+    res_head <- res_head_base
+    res_head[iresponse:res_size,]=0
+    train_in <- c(list(call = call_head),
+                  list(res = res_head),
+                  context_heads,
+                  list(answer = res_head_base[iresponse,]))
+    training_dat = c(training_dat,list(train_in))
+  }
+  
+}
+```
+
+Now that we have everything arranged in heads, we must arrange again to be compatible with convolutional layers:
+```{r}
+x_call=abind(lapply(training_dat,function(x)array_reshape(x$call,c(1,call_size,length(call_features),1))),along = 1)
+x_res=abind(lapply(training_dat,function(x)array_reshape(x$res,c(1,res_size,length(res_features),1))),along = 1)
+x_cont=list()
+for (icl in 1:context_len){
+  x_cont[[paste0("context",icl)]]=abind(lapply(training_dat,function(x)array_reshape(x[[paste0("context_",icl)]],c(1,context_size[icl],length(context_features),1))),along = 1)
+}
+names(x_cont)=NULL
+```
+Then we retrieve our answers. Remember with how we go event-wise there is some overlap, so it is best to grab it from the training_dat directly.
+```{r}
+y_outputs = do.call(rbind,lapply(training_dat,function(x)x$answer))
+```
+
+Select training data
+```{r}
+# Train range
+N <- round(length(training_dat)*0.7)
+train_sel <- 1:N
+test_sel <- (N+1):(length(training_dat))
+
+y_train <- y_outputs[train_sel,]
+train_call <- x_call[train_sel,,,]
+train_res <- x_res[train_sel,,,]
+train_cont <- lapply(x_cont,function(x) x[train_sel,,,])
+```
+
+Load in functions
+```{r}
+source("../R/build_cerberus.R")
+```
+
+And finally we can build and train our neural network
+```{r}
+training_all <- list(inputs=list("train_call"=train_call,
+                                 "train_cont"=train_cont,
+                                 "train_res"=train_res),
+                     outputs = y_train)
+# model <- build_cerberus(training_all, 64)
+# model <- train_cerberus(model,training_all, 50)
+model <- build_cerberus(training_all, 64)
+model <- train_cerberus(model, training_all, epochs = 50)
+
+```
+```{r}
+training_res = (model %>% predict(c(list(train_call),train_cont,list(train_res))))
+image(training_res)
+image(y_train)
+print(paste0("Training RMSE: ",sqrt(mean((training_res-y_train)^2))))
+```
+```{r}
+all_res = (model %>% predict(c(list(x_call),x_cont,list(x_res))))
+image(all_res)
+image(y_outputs)
+print(paste0("All RMSE: ",sqrt(mean((all_res-y_outputs)^2))))
+```
+
+Now we have to evaluate it generatively, meaning we first give it a timestamp with no response, make it come up with a single prediction, pass that in as the response, and continue. 
+```{r}
+
+generate_in <-function(responses,timestamp){
+  res_head_base <- responses
+
+  call_head <- assign_call(resampled_time_series$call_resamp,timestamp,call_size,call_features)
+  context_heads = list()
+  for (icontext in 1:length(context_size)){
+    context_heads[[paste0("context_",icontext)]]<-  assign_call(resampled_time_series[[sprintf("context_%s_resamp",icontext)]],
+                                                                timestamp,
+                                                                context_size[icontext],
+                                                                context_features)
+  }
+  test_in <- list(c(list(call = call_head),
+                  list(res = res_head_base),
+                  context_heads))
+  test_call=abind(lapply(test_in,function(x)array_reshape(x$call,c(1,call_size,length(call_features),1))),along = 1)
+  test_res=abind(lapply(test_in,function(x)array_reshape(x$res,c(1,res_size,length(res_features),1))),along = 1)
+  test_cont=list()
+  for (icl in 1:context_len){
+    test_cont[[paste0("context",icl)]]=abind(lapply(test_in,function(x)array_reshape(x[[paste0("context_",icl)]],c(1,context_size[icl],length(context_features),1))),along = 1)
+  }
+  names(test_cont)=NULL
+  return(c(list(test_call),test_cont,list(test_res)))
+}
+
+responses = matrix(0,nrow=res_size,ncol=length(res_features))
+#timestamp <- sample(resampled_time_series$res_resamp$timestamp,1)
+#timestamp <- tail(resampled_time_series$res_resamp$timestamp,12)[1]
+timestamp <- tail(resampled_time_series$res_resamp$timestamp,sample(12:50,1))[1]
+
+for (icount in 1:event_size){
+  testres=(model %>% predict(generate_in(responses,timestamp)))
+  responses[icount,]=testres
+}
+
+start_index = which(resampled_time_series$res_resamp$timestamp==timestamp)
+end_index = start_index+event_size-1
+actual = resampled_time_series$res_resamp[start_index:end_index,res_features]
+
+matplot(actual,type="l",lwd=2)
+matpoints(responses,type="l",lwd=1)
+```
+

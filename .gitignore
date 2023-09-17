@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+data/glove.6B.50d.txt
+data/jena_climate_2009_2016.csv
+tests/test_cerberus_build.nb.html
+img/working_flowchart.drawio
