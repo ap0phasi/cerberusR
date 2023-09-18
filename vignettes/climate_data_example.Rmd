@@ -20,8 +20,6 @@ library(tensorflow)
 
 library(cerberusR)
 
-set.seed(128)
-
 ```
 
 
@@ -105,7 +103,12 @@ print(paste0("All RMSE: ",sqrt(mean((all_res-prepared_data$formatted_all$outputs
 
 Now we have to evaluate it generatively, meaning we first give it a timestamp with no response, make it come up with a single prediction, pass that in as the response, and continue. 
 ```{r}
-timestamp <- tail(prepared_data$resampled_time_series$res_resamp$timestamp,sample(12:50,1))[1]
+
+#To use a random timestamp
+#timestamp <- tail(prepared_data$resampled_time_series$res_resamp$timestamp,sample(12:50,1))[1]
+
+#Selecting a timestamp
+timestamp <- prepared_data$resampled_time_series$res_resamp$timestamp[4957]
 
 responses = generate_prediction(model,timestamp,
                                 prepared_data$resampled_time_series,
@@ -121,7 +124,7 @@ matplot(responses,type="l",lwd=2)
 matpoints(actual,type="l")
 ```
 
-This shows how our model compares to the resampled data, but we can also use cerberusR's descaling functionality to compare
+This shows how our model compares to the resampled data with the thicker lines being our modeled response, but we can also use cerberusR's descaling functionality to compare
 to the raw data. 
 ```{r}
 generated_prediction <- descale_response(responses,
@@ -135,7 +138,7 @@ for (ipp in 1:length(res_features)){
           xlab = "Time",ylab="Unscaled Value")
   matlines(time_series_data[,1],time_series_data[,res_features[ipp]],col = "blue")
   title(res_features[ipp])
-  legend('bottom', legend = c('Modeled', 'Observed'), col = c('red', 'blue'), lty = 1)
+  legend('topleft', legend = c('Modeled', 'Observed'), col = c('red', 'blue'), lty = 1)
 }
 
 ```

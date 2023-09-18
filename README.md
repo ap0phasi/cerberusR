@@ -4,7 +4,7 @@
 ## Table of Contents
 * [Installation](#install)
 * [Background](#background)
-* [Architecture] (#architecture)
+* [Architecture](#architecture)
 * [Usage](#usage)
 
 ## Installation
